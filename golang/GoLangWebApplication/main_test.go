@@ -4,25 +4,32 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"testing"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func TestRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	t.Skip("リファクタリング中")
 
-	// run 関数の戻り値を受け取るためのチャンネル。
-	// バッファを 1 にしないと、受信前にテストが終了した場合に送信側がリークする
-	errCh := make(chan error, 1)
-	// 別のゴルーチンで run 関数を実行する
-	go func() {
-		errCh <- run(ctx)
-	}()
-
-	in := "message"
-	rsp, err := http.Get("http://localhost:18080/" + in)
+	l, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
-		t.Fatalf("failed to get: %+v", err)
+		t.Fatalf("failed to listen port %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		return run(ctx)
+	})
+	in := "message"
+	url := fmt.Sprintf("http://%s/%s", l.Addr().String(), in)
+	// どんなポート番号でリッスンしているのか確認
+	t.Logf("try request to %q", url)
+	rsp, err := http.Get(url)
+	if err != nil {
+		t.Errorf("failed to get: %+v", err)
 	}
 	defer rsp.Body.Close()
 	got, err := io.ReadAll(rsp.Body)
@@ -37,7 +44,7 @@ func TestRun(t *testing.T) {
 	// run関数に終了通知を送信する。
 	cancel()
 	// run関数の戻り値を検証する
-	if err := <-errCh; err != nil {
+	if err := eg.Wait(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -2,55 +2,65 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/e601201/learningORLs/golang/GoLangWebApplication/config"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		log.Printf("failed to terminate server: %v", err)
+		log.Printf("failed to terminated server: %v", err)
+		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context) error {
-
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cfg, err := config.New()
+	if err != nil {
+		return err
+	}
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	if err != nil {
+		return fmt.Errorf("failed to listen port %d: %w", cfg.Port, err)
+	}
+	url := fmt.Sprintf("http://%s", l.Addr().String())
+	log.Printf("start with: %v", url)
 	s := &http.Server{
-		Addr: ":18080",
+		// 引数で受け取ったnet.Listenerを利用するので、
+		// Addrフィールドは指定しない
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// コマンドラインで実験するため
+			time.Sleep(5 * time.Second)
 			fmt.Fprintf(w, "Hello, %s!", r.URL.Path[1:])
 		}),
 	}
-
-	// ゴルーチンが異常終了したときに ctx をキャンセルできるようにする
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// ゴルーチンの終了と error を受け取るためのチャンネル。
-	// バッファを 1 にしないと、受信前に run が return した場合に送信側がリークする
-	errCh := make(chan error, 1)
-
-	// 別のゴルーチンでサーバーを起動
-	go func() {
-		if err := s.ListenAndServe(); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		// ListenAndServeメソッドではなく、Serveメソッドに変更する
+		if err := s.Serve(l); err != nil &&
+			// http.ErrServerClosed は
+			// http.Server.Shutdown() が正常に終了したことを示すので異常ではない。
+			err != http.ErrServerClosed {
 			log.Printf("failed to close: %+v", err)
-			errCh <- err
-			// 起動に失敗した場合は自分で ctx をキャンセルしないと
-			// 下の <-ctx.Done() から抜けられない
-			cancel()
-			return
+			return err
 		}
-		errCh <- nil
-	}()
+		return nil
+	})
 
-	// チャンネルからの通知（）終了通知を待機する
 	<-ctx.Done()
 	if err := s.Shutdown(context.Background()); err != nil {
 		log.Printf("failed to shutdown: %+v", err)
-		return err
 	}
-	// ゴルーチンの終了を待ち、その error を返す
-	return <-errCh
+	// グレースフルシャットダウンの終了を待つ。
+	return eg.Wait()
 }
